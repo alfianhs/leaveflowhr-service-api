@@ -107,7 +107,7 @@ The database is automatically seeded on first run via `Infrastructure/Database/D
 | Name | Email | Password | Role |
 |---|---|---|---|
 | Admin | admin@mail.com | `securepassword` | Admin |
-| HR Admin | hr@mail.com | `securepassword` | HR |
+| HR | hr@mail.com | `securepassword` | HR |
 | Manager | manager@mail.com | `securepassword` | Manager |
 | Employee | employee@mail.com | `securepassword` | Employee |
 
