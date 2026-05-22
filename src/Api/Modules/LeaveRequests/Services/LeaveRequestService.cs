@@ -32,7 +32,7 @@ public class LeaveRequestService : ILeaveRequestService
     {
         _dbContext = dbContext;
     }
-    
+
     public async Task<ServiceResult<PaginationResponseDto<LeaveRequestResponseDto>>> GetPaginatedListAsync(PaginationRequestDto request, Guid userId)
     {
         List<LeaveRequestResponseDto> leaveRequests = await _dbContext.LeaveRequests
@@ -54,7 +54,7 @@ public class LeaveRequestService : ILeaveRequestService
             Page = request.Page,
             PageSize = request.PageSize
         };
-        
+
         return ServiceResult<PaginationResponseDto<LeaveRequestResponseDto>>.Success(paginationResponse);
     }
 
@@ -74,7 +74,7 @@ public class LeaveRequestService : ILeaveRequestService
 
         return ServiceResult<LeaveRequestResponseDto?>.Success(leaveRequest);
     }
-    
+
     public async Task<ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>> CreateAsync(LeaveRequestCreateRequestDto request, Guid userId)
     {
         // Check if user exists
@@ -85,23 +85,6 @@ public class LeaveRequestService : ILeaveRequestService
         if (user == null)
         {
             return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("User not found");
-        }
-
-        // Check user leave balance this year
-        int currentYear = DateTime.UtcNow.Year;
-        LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
-            .Where(x => x.UserId == userId && x.Year == currentYear && x.DeletedAt == null)
-            .FirstOrDefaultAsync();
-        if (leaveBalance == null)
-        {
-            return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("Leave balance not found");
-        }
-
-        // Check if user has enough leave balance
-        int requestedDays = DateUtility.DifferenceInBusinessDays(request.StartDate, request.EndDate);
-        if (requestedDays > (leaveBalance.EntitledDays - leaveBalance.UsedDays - leaveBalance.PendingDays))
-        {
-            return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("Not enough leave balance");
         }
 
         // Check if user has overlapping request
@@ -118,6 +101,32 @@ public class LeaveRequestService : ILeaveRequestService
             return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("You already have an approved leave request on the selected dates");
         }
 
+        // Calculate requested days
+        int requestedDays = DateUtility.DifferenceInBusinessDays(request.StartDate, request.EndDate);
+        
+        // Check user leave balance this year if request type is annual
+        if (request.Type == LeaveType.ANNUAL)
+        {
+            int currentYear = DateTime.UtcNow.Year;
+            LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
+                .Where(x => x.UserId == userId && x.Year == currentYear && x.DeletedAt == null)
+                .FirstOrDefaultAsync();
+            if (leaveBalance == null)
+            {
+                return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("Leave balance not found");
+            }
+
+            // Check if user has enough leave balance
+            if (requestedDays > (leaveBalance.EntitledDays - leaveBalance.UsedDays - leaveBalance.PendingDays))
+            {
+                return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("Not enough leave balance");
+            }
+
+            leaveBalance.PendingDays += requestedDays;
+            leaveBalance.UpdatedAt = DateTime.UtcNow;
+            _dbContext.LeaveBalances.Update(leaveBalance);
+        }
+
         // Create leave request
         LeaveRequest newLeaveRequest = new LeaveRequest
         {
@@ -130,11 +139,6 @@ public class LeaveRequestService : ILeaveRequestService
             Status = LeaveRequestStatus.PENDING
         };
         _dbContext.LeaveRequests.Add(newLeaveRequest);
-
-        // Update leave balance pending days
-        leaveBalance.PendingDays += requestedDays;
-        leaveBalance.UpdatedAt = DateTime.UtcNow;
-        _dbContext.LeaveBalances.Update(leaveBalance);
 
         // Check user manager if null direct approval to HR
         if (user.ManagerId == null)
@@ -166,7 +170,7 @@ public class LeaveRequestService : ILeaveRequestService
 
         // Save
         await _dbContext.SaveChangesAsync();
-        
+
         // Return leave request
         return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Success(newLeaveRequest.ToLeaveRequestSimpleWithoutUserResponseDto());
     }
@@ -189,7 +193,7 @@ public class LeaveRequestService : ILeaveRequestService
             return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("You are not authorized to cancel this leave request");
         }
 
-         // Only pending leave request can be cancelled
+        // Only pending leave request can be cancelled
         if (leaveRequest.Status != LeaveRequestStatus.PENDING)
         {
             return ServiceResult<LeaveRequestSimpleWithoutUserResponseDto?>.Failure("Only pending leave request can be cancelled");
@@ -256,23 +260,26 @@ public class LeaveRequestService : ILeaveRequestService
         approval.UpdatedAt = DateTime.UtcNow;
         _dbContext.Approvals.Update(approval);
 
-        // If approver is hr, update leave request status to approved and update leave balance pending days and used days
+        // If approver is hr, update leave request status to approved and update leave balance pending days and used days if annual leave
         if (approverRole == EmployeeRole.HR.ToString())
         {
             leaveRequest.Status = LeaveRequestStatus.APPROVED;
             leaveRequest.UpdatedAt = DateTime.UtcNow;
             _dbContext.LeaveRequests.Update(leaveRequest);
 
-            int currentYear = DateTime.UtcNow.Year;
-            LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
-                .Where(x => x.UserId == leaveRequest.UserId && x.Year == currentYear && x.DeletedAt == null)
-                .FirstOrDefaultAsync();
-            if (leaveBalance != null)
+            if (leaveRequest.Type == LeaveType.ANNUAL)
             {
-                leaveBalance.PendingDays -= leaveRequest.TotalDays;
-                leaveBalance.UsedDays += leaveRequest.TotalDays;
-                leaveBalance.UpdatedAt = DateTime.UtcNow;
-                _dbContext.LeaveBalances.Update(leaveBalance);
+                int currentYear = DateTime.UtcNow.Year;
+                LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
+                    .Where(x => x.UserId == leaveRequest.UserId && x.Year == currentYear && x.DeletedAt == null)
+                    .FirstOrDefaultAsync();
+                if (leaveBalance != null)
+                {
+                    leaveBalance.PendingDays -= leaveRequest.TotalDays;
+                    leaveBalance.UsedDays += leaveRequest.TotalDays;
+                    leaveBalance.UpdatedAt = DateTime.UtcNow;
+                    _dbContext.LeaveBalances.Update(leaveBalance);
+                }
             }
         }
         else
@@ -326,16 +333,19 @@ public class LeaveRequestService : ILeaveRequestService
         leaveRequest.UpdatedAt = DateTime.UtcNow;
         _dbContext.LeaveRequests.Update(leaveRequest);
 
-        // Update leave balance pending days and used days
-        int currentYear = DateTime.UtcNow.Year;
-        LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
-            .Where(x => x.UserId == leaveRequest.UserId && x.Year == currentYear && x.DeletedAt == null)
-            .FirstOrDefaultAsync();
-        if (leaveBalance != null)
+        // Update leave balance pending days and used days if annual leave
+        if (leaveRequest.Type == LeaveType.ANNUAL)
         {
-            leaveBalance.PendingDays -= leaveRequest.TotalDays;
-            leaveBalance.UpdatedAt = DateTime.UtcNow;
-            _dbContext.LeaveBalances.Update(leaveBalance);
+            int currentYear = DateTime.UtcNow.Year;
+            LeaveBalance? leaveBalance = await _dbContext.LeaveBalances
+                .Where(x => x.UserId == leaveRequest.UserId && x.Year == currentYear && x.DeletedAt == null)
+                .FirstOrDefaultAsync();
+            if (leaveBalance != null)
+            {
+                leaveBalance.PendingDays -= leaveRequest.TotalDays;
+                leaveBalance.UpdatedAt = DateTime.UtcNow;
+                _dbContext.LeaveBalances.Update(leaveBalance);
+            }
         }
 
         // Save
